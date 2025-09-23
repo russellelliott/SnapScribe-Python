@@ -7,8 +7,6 @@ import sys
 from pathlib import Path
 from typing import List, Tuple, Optional
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-import multiprocessing
 
 # Suppress OpenCV warnings about ECI encoding (Extended Channel Interpretation)
 # These warnings appear when QR codes contain non-ASCII characters but are harmless
@@ -35,57 +33,6 @@ class QRCodeDetector:
     def __init__(self):
         """Initialize the QR code detector."""
         self.qr_detector = cv2.QRCodeDetector()
-    
-    def _apply_preprocessing_technique(self, args) -> List[Tuple[str, np.ndarray]]:
-        """
-        Apply a single preprocessing technique and detect QR codes.
-        Helper method for parallel processing.
-        
-        Args:
-            args: Tuple of (technique_name, processed_img, scale, found_texts)
-            
-        Returns:
-            List[Tuple[str, np.ndarray]]: List of new QR codes found
-        """
-        technique_name, processed_img, scale, found_texts = args
-        
-        # Apply scale if needed
-        if scale != 1.0:
-            height, width = processed_img.shape[:2]
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            scaled_img = cv2.resize(processed_img, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
-        else:
-            scaled_img = processed_img
-        
-        new_qr_codes = []
-        
-        try:
-            # Try multi-detection
-            retval, decoded_info, points, _ = self.qr_detector.detectAndDecodeMulti(scaled_img)
-            if retval and decoded_info:
-                for i, info in enumerate(decoded_info):
-                    if info and info not in found_texts:  # Avoid duplicates
-                        # Scale points back if we resized the image
-                        if scale != 1.0:
-                            scaled_points = points[i] / scale
-                            new_qr_codes.append((info, scaled_points.astype(np.float32)))
-                        else:
-                            new_qr_codes.append((info, points[i]))
-            
-            # Also try single detection
-            data, single_points, _ = self.qr_detector.detectAndDecode(scaled_img)
-            if data and data not in found_texts:
-                if scale != 1.0:
-                    scaled_points = single_points / scale
-                    new_qr_codes.append((data, scaled_points.astype(np.float32)))
-                else:
-                    new_qr_codes.append((data, single_points))
-                    
-        except Exception as e:
-            pass  # Continue on error
-        
-        return new_qr_codes
     
     def load_heic_image(self, image_path: str) -> Optional[np.ndarray]:
         """
@@ -174,80 +121,93 @@ class QRCodeDetector:
                 if data:
                     qr_codes.append((data, points))
             
-            # Always try different preprocessing techniques to find additional QR codes
-            # This removes the arbitrary "< 3" limit and ensures we find all possible QR codes
-            # Convert to grayscale first
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image
-            
-            found_texts = set([qr[0] for qr in qr_codes])  # Track what we've already found
-            
-            # Apply various preprocessing techniques
-            techniques = []
-            
-            # Enhanced contrast using CLAHE
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-            clahe_enhanced = clahe.apply(gray)
-            techniques.append(("CLAHE", clahe_enhanced))
-            
-            # Adaptive thresholding 
-            adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            techniques.append(("Adaptive", adaptive_thresh))
-            
-            # Otsu's thresholding (good for bimodal images)
-            _, otsu_thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            techniques.append(("Otsu", otsu_thresh))
-            
-            # Try inverted Otsu for Instagram-style QR codes (white on black)
-            _, otsu_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            techniques.append(("OtsuInv", otsu_inv))
-            
-            # Aggressive contrast enhancement for low contrast images
-            contrast_enhanced = cv2.convertScaleAbs(gray, alpha=2.0, beta=50)
-            techniques.append(("HighContrast", contrast_enhanced))
-            
-            # Gamma correction for very dark or very bright images
-            gamma_dark = cv2.LUT(gray, np.array([((i / 255.0) ** (1.0 / 0.5)) * 255 for i in range(256)]).astype("uint8"))
-            techniques.append(("GammaDark", gamma_dark))
-            
-            gamma_bright = cv2.LUT(gray, np.array([((i / 255.0) ** (1.0 / 1.5)) * 255 for i in range(256)]).astype("uint8"))
-            techniques.append(("GammaBright", gamma_bright))
-            
-            # Bilateral filter for noise reduction while preserving edges
-            bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
-            techniques.append(("Bilateral", bilateral))
-            
-            # Create tasks for parallel processing
-            tasks = []
-            for scale in [1.0, 1.5]:  # Try at original scale and 1.5x scale
-                for technique_name, processed_img in techniques:
-                    tasks.append((technique_name, processed_img, scale, found_texts.copy()))
-            
-            # Process techniques in parallel using ThreadPoolExecutor
-            max_workers = min(len(tasks), multiprocessing.cpu_count(), 8)  # Cap at 8 workers
-            
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all tasks
-                future_to_task = {
-                    executor.submit(self._apply_preprocessing_technique, task): task 
-                    for task in tasks
-                }
+            # If we found some QR codes but suspect there might be more, 
+            # OR if we found no QR codes, try different preprocessing techniques
+            if len(qr_codes) < 3:  # Assume there could be up to 3 QR codes in most images
+                # Convert to grayscale first
+                if len(image.shape) == 3:
+                    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = image
                 
-                # Collect results
-                for future in future_to_task:
-                    try:
-                        new_qr_codes = future.result()
-                        
-                        # Add new unique QR codes
-                        for qr_text, qr_points in new_qr_codes:
-                            if qr_text not in found_texts:
-                                found_texts.add(qr_text)
-                                qr_codes.append((qr_text, qr_points))
-                                
-                    except Exception as e:
-                        continue  # Skip failed tasks
+                found_texts = set([qr[0] for qr in qr_codes])  # Track what we've already found
+                
+                # Apply various preprocessing techniques (optimized list)
+                techniques = []
+                
+                # Enhanced contrast using CLAHE
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                clahe_enhanced = clahe.apply(gray)
+                techniques.append(("CLAHE", clahe_enhanced))
+                
+                # Adaptive thresholding 
+                adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                techniques.append(("Adaptive", adaptive_thresh))
+                
+                # Otsu's thresholding (good for bimodal images)
+                _, otsu_thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                techniques.append(("Otsu", otsu_thresh))
+                
+                # Try inverted Otsu for Instagram-style QR codes (white on black)
+                _, otsu_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                techniques.append(("OtsuInv", otsu_inv))
+                
+                # Aggressive contrast enhancement for low contrast images
+                contrast_enhanced = cv2.convertScaleAbs(gray, alpha=2.0, beta=50)
+                techniques.append(("HighContrast", contrast_enhanced))
+                
+                # Gamma correction for very dark or very bright images
+                gamma_dark = cv2.LUT(gray, np.array([((i / 255.0) ** (1.0 / 0.5)) * 255 for i in range(256)]).astype("uint8"))
+                techniques.append(("GammaDark", gamma_dark))
+                
+                gamma_bright = cv2.LUT(gray, np.array([((i / 255.0) ** (1.0 / 1.5)) * 255 for i in range(256)]).astype("uint8"))
+                techniques.append(("GammaBright", gamma_bright))
+                
+                # Bilateral filter for noise reduction while preserving edges
+                bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+                techniques.append(("Bilateral", bilateral))
+                
+                # Try each technique at original scale and one additional scale
+                for scale in [1.0, 1.5]:  # Only two scales to keep it fast
+                    # Resize if needed
+                    if scale != 1.0:
+                        height, width = gray.shape[:2]
+                        new_width = int(width * scale)
+                        new_height = int(height * scale)
+                    
+                    for technique_name, processed_img in techniques:
+                        # Apply scale if needed
+                        if scale != 1.0:
+                            scaled_img = cv2.resize(processed_img, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+                        else:
+                            scaled_img = processed_img
+                            
+                        try:
+                            # Try multi-detection
+                            retval, decoded_info, points, _ = self.qr_detector.detectAndDecodeMulti(scaled_img)
+                            if retval and decoded_info:
+                                for i, info in enumerate(decoded_info):
+                                    if info and info not in found_texts:  # Avoid duplicates
+                                        found_texts.add(info)
+                                        # Scale points back if we resized the image
+                                        if scale != 1.0:
+                                            scaled_points = points[i] / scale
+                                            qr_codes.append((info, scaled_points.astype(np.float32)))
+                                        else:
+                                            qr_codes.append((info, points[i]))
+                            
+                            # Also try single detection for this processed image
+                            data, single_points, _ = self.qr_detector.detectAndDecode(scaled_img)
+                            if data and data not in found_texts:
+                                found_texts.add(data)
+                                if scale != 1.0:
+                                    scaled_points = single_points / scale
+                                    qr_codes.append((data, scaled_points.astype(np.float32)))
+                                else:
+                                    qr_codes.append((data, single_points))
+                                    
+                        except Exception as e:
+                            continue
         
         except Exception as e:
             print(f"Error detecting QR codes: {e}")
