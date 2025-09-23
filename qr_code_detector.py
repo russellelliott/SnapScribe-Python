@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 import argparse
 
+# Suppress OpenCV warnings about ECI encoding (Extended Channel Interpretation)
+# These warnings appear when QR codes contain non-ASCII characters but are harmless
+os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
+
 try:
     from PIL import Image
     from pillow_heif import register_heif_opener
@@ -18,6 +22,9 @@ except ImportError:
     HEIC_SUPPORT = False
     print("Warning: pillow-heif not installed. HEIC support disabled.")
     print("Install with: pip install pillow-heif")
+
+# Additional OpenCV warning suppression
+cv2.setLogLevel(1)  # Only show errors
 
 
 class QRCodeDetector:
