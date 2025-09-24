@@ -5,3 +5,4 @@ pillow-heif>=0.13.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
+google-generativeai>=0.8.5
