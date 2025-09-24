@@ -10,6 +10,12 @@ A Python application that uses OpenCV to detect and decode QR codes in HEIC (Hig
 - **Command Line Interface**: Easy-to-use CLI for batch processing
 - **Flexible Output**: Save results to file and/or display on screen
 
+
+Actuvate environment first
+```bash
+source .venv/bin/activate
+```
+
 ## Installation
 
 1. Clone or download this repository
