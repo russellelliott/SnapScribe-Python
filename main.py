@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import asyncio
 import tempfile
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -103,17 +103,26 @@ class QRCodeDetector:
             techniques = ["CLAHE", "Adaptive", "Otsu", "OtsuInv", "HighContrast",
                           "GammaDark", "GammaBright", "Bilateral"]
 
-            for tech in techniques:
+            # Parallelize preprocessing per image
+            def process_technique(tech):
                 processed_img = self._apply_preprocessing_technique(tech, gray)
                 try:
                     retval, decoded_info, points, _ = self.qr_detector.detectAndDecodeMulti(processed_img)
+                    new_qrs = []
                     if retval and decoded_info:
                         for i, info in enumerate(decoded_info):
                             if info and info not in found_texts:
                                 found_texts.add(info)
-                                qr_codes.append((info, points[i]))
+                                new_qrs.append((info, points[i]))
+                    return new_qrs
                 except:
-                    continue
+                    return []
+
+            with ThreadPoolExecutor(max_workers=min(len(techniques), 8)) as executor:
+                futures = [executor.submit(process_technique, tech) for tech in techniques]
+                for f in futures:
+                    qr_codes.extend(f.result())
+
         except Exception as e:
             pass
         return qr_codes
@@ -139,7 +148,7 @@ class QRCodeDetector:
 
 def process_file_worker(file_path: str) -> Dict[str, Any]:
     """Top-level worker function for ProcessPoolExecutor."""
-    detector = QRCodeDetector()  # create detector inside process
+    detector = QRCodeDetector()
     return detector.process_single_file(file_path)
 
 # ------------------ FASTAPI ------------------ #
